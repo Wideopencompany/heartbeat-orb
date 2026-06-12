@@ -642,6 +642,7 @@ const WAVE_PERIOD = 3.0;   // seconds between new colors
 const WAVE_SWEEP = 1.7;    // seconds for a front to cross the orb
 const sweepFlash = new Float32Array(N_CELLS);
 const _wq = new THREE.Vector3();
+let orbitT = 9e9, orbitK = 1;   // CYCLE proton fling: time since last wave, current orbit multiplier
 const targetS = { ...S };
 const tw  = { bpm: 52, rot: 1, breathe: 0 };   // current (tweened)
 const tgt = { bpm: 52, rot: 1, breathe: 0 };   // target
@@ -828,6 +829,7 @@ function tick() {
       waveHue = (waveHue + 0.14) % 1;
       wave = { pal: paletteTargets(monoHuePalette(waveHue)), t: 0,
                done: new Array(N_CELLS).fill(false), coreDone: false };
+      orbitT = 0;   // fling the protons with every new color
     }
     if (wave) {
       wave.t += dt;
@@ -909,12 +911,22 @@ function tick() {
   grainPass.uniforms.uTime.value = t;
 
   // proton orbiters
+  // CYCLE: each color wave flings the orbits out (1 -> 3, quick) and then
+  // they ease gently back toward the center before the next wave
+  orbitT += dt;
+  if (colorWaveOn) {
+    const att = Math.min(orbitT / 0.35, 1);                    // quick fling out
+    const rel = Math.exp(-Math.max(orbitT - 0.35, 0) * 1.1);   // slow ease home
+    orbitK = 1 + 2 * (att * att * (3 - 2 * att)) * rel;
+  } else {
+    orbitK = S.porbit;
+  }
   for (let i = 0; i < MAX_PROTONS; i++) {
     const m = protons[i], d = m.userData;
     m.visible = i < S.protons;
     if (!m.visible) continue;
     d.th += dt * d.speed * S.pspeed;
-    const r = d.rBase * S.porbit;
+    const r = d.rBase * orbitK;
     m.position.set(0, 0, 0)
       .addScaledVector(d.A, Math.cos(d.th) * r * d.ecc)
       .addScaledVector(d.B, Math.sin(d.th) * r);
@@ -935,7 +947,7 @@ function tick() {
 setBehavior('idle', true);   // idle IS the default on load
 window.__orb = { lobes, centers, orb, palTarget, palCur,
   get behavior() { return behavior; },
-  get waveState() { return { colorWaveOn, waveClock, waveHue, wave: wave && { t: wave.t, done: wave.done.filter(Boolean).length } }; } };
+  get waveState() { return { colorWaveOn, waveClock, waveHue, orbitT, orbitK, wave: wave && { t: wave.t, done: wave.done.filter(Boolean).length } }; } };
 tick();
 </script>
 </body>
