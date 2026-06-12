@@ -45,6 +45,7 @@
   }
   #panel .bbtn:hover { background:rgba(255,255,255,0.12); }
   #panel .bbtn.active { background:rgba(90,216,200,0.22); color:#5ad8c8; border-color:rgba(90,216,200,0.5); }
+  #panel #micbtn { grid-column:1 / -1; }
   #panel #micbtn.live { background:rgba(255,80,80,0.2); color:#ff8a7a; border-color:rgba(255,90,80,0.55); }
 </style>
 <script type="importmap">
@@ -521,7 +522,7 @@ const swatchEls = {};
     const cs = [p.hero, p.lobes[1], p.lobes[3], p.lobes[5]]
       .map(c => '#' + c.toString(16).padStart(6, '0'));
     el.style.background = `linear-gradient(135deg, ${cs[0]} 0%, ${cs[1]} 35%, ${cs[2]} 65%, ${cs[3]} 100%)`;
-    el.onclick = () => { hueCycleOn = false; setPalette(p); };
+    el.onclick = () => { hueCycleOn = false; colorWaveOn = false; setPalette(p); };
     swatchEls[p.name] = el;
     row.appendChild(el);
   };
@@ -622,10 +623,25 @@ const BEHAVIORS = {
     sliders: { spasm: 2.8, glow: 1.35, contrast: 1.25, transparency: 0.70, grain: 0,
                refraction: 1.20, protons: 18, pspeed: 2.3, porbit: 1.45, psize: 0.50 },
   },
+  cycle: {     // rotating colors: each new hue is born on the orb's side and
+               // its front sweeps across, claiming piece after piece
+    label: 'CYCLE', palette: 'Mono Cyan', gradcore: false, bpm: 64, rot: 1.1, breathe: 0, colorWave: true,
+    sliders: { spasm: 1.4, glow: 0.9, contrast: 1.02, transparency: 0.85, grain: 0,
+               refraction: 1.20, protons: 14, pspeed: 0.7, porbit: 1.8, psize: 0.39 },
+  },
 };
 
 let behavior = 'idle';
 let hueCycleOn = false, hueT = 0.52;   // start the cycle at cyan
+
+// CYCLE color waves: a wave carries one new color from the orb's left side
+// (world space, so the entry side stays fixed while the orb spins) to the
+// right, claiming each piece the moment the front passes its center
+let colorWaveOn = false, waveHue = 0.52, wave = null, waveClock = 0;
+const WAVE_PERIOD = 3.0;   // seconds between new colors
+const WAVE_SWEEP = 1.7;    // seconds for a front to cross the orb
+const sweepFlash = new Float32Array(N_CELLS);
+const _wq = new THREE.Vector3();
 const targetS = { ...S };
 const tw  = { bpm: 52, rot: 1, breathe: 0 };   // current (tweened)
 const tgt = { bpm: 52, rot: 1, breathe: 0 };   // target
@@ -639,7 +655,9 @@ function setBehavior(name, instant = false) {
   gradCb.checked = B.gradcore;
   heartU.uMode.value = B.gradcore ? 1 : 0;
   hueCycleOn = !!B.hueCycle;
-  if (hueCycleOn)
+  colorWaveOn = !!B.colorWave;
+  if (colorWaveOn) { wave = null; waveClock = WAVE_PERIOD; }   // first wave fires immediately
+  if (hueCycleOn || colorWaveOn)
     document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
   else
     setPalette(ALL_PALETTES.find(p => p.name === B.palette));
@@ -799,7 +817,42 @@ function tick() {
     hueT = (hueT + dt * 0.05) % 1;
     palTarget = paletteTargets(monoHuePalette(hueT));
   }
-  lerpPalette(Math.min(1, dt * 4));
+
+  // CYCLE: every few seconds a new color is born on the left side and its
+  // front sweeps across the orb, taking over piece by piece; the core,
+  // lights and background flip as the front crosses the middle
+  if (colorWaveOn) {
+    waveClock += dt;
+    if (waveClock >= WAVE_PERIOD && !wave) {
+      waveClock = 0;
+      waveHue = (waveHue + 0.14) % 1;
+      wave = { pal: paletteTargets(monoHuePalette(waveHue)), t: 0,
+               done: new Array(N_CELLS).fill(false), coreDone: false };
+    }
+    if (wave) {
+      wave.t += dt;
+      const front = -1.25 + 2.5 * (wave.t / WAVE_SWEEP);
+      for (let i = 0; i < N_CELLS; i++) {
+        if (wave.done[i]) continue;
+        _wq.copy(centers[i]).applyQuaternion(orb.quaternion);
+        if (_wq.x <= front) {
+          wave.done[i] = true;
+          palTarget.tints[i].copy(wave.pal.tints[i]);
+          sweepFlash[i] = 1;
+        }
+      }
+      if (!wave.coreDone && front >= 0) {
+        wave.coreDone = true;
+        palTarget.coreDeep.copy(wave.pal.coreDeep);
+        palTarget.coreGlow.copy(wave.pal.coreGlow);
+        wave.pal.lights.forEach((c, i) => palTarget.lights[i].copy(c));
+        palTarget.bg.copy(wave.pal.bg);
+      }
+      if (wave.t >= WAVE_SWEEP) wave = null;
+    }
+  }
+  // claimed pieces snap over fast in wave mode so the front edge stays crisp
+  lerpPalette(Math.min(1, dt * (colorWaveOn ? 7 : 4)));
 
   // microphone level above its own running average -> force on the springs
   let audio = 0;
@@ -832,7 +885,9 @@ function tick() {
 
     lobeU[i].beat.value = cellX[i] + 0.015 * Math.sin(t * 1.6 + i * 13.7);
     lobeU[i].vel.value = cellV[i];
-    lobes[i].material.emissiveIntensity = (0.04 + Math.max(cellX[i], 0) * 0.9) * S.glow;
+    sweepFlash[i] = Math.max(0, sweepFlash[i] - dt * 2.2);   // takeover flash fades
+    lobes[i].material.emissiveIntensity =
+      (0.04 + Math.max(cellX[i], 0) * 0.9 + sweepFlash[i] * 0.55) * S.glow;
   }
   sharedT.value = t;
   sharedGlob.value = globalX;
@@ -878,6 +933,9 @@ function tick() {
   composer.render();
 }
 setBehavior('idle', true);   // idle IS the default on load
+window.__orb = { lobes, centers, orb, palTarget, palCur,
+  get behavior() { return behavior; },
+  get waveState() { return { colorWaveOn, waveClock, waveHue, wave: wave && { t: wave.t, done: wave.done.filter(Boolean).length } }; } };
 tick();
 </script>
 </body>
