@@ -472,6 +472,7 @@ const protons = [];
 const MAX_SWARM = 16000;
 const SW = { count: 7000, size: 1.0, flow: 0.85, scale: 2.2, speed: 1.0,
              spin: 0.55, shell: 1.05, spread: 0.14, scatter: 1.0, gloss: 0.9 };
+const SW_DEFAULTS = { ...SW };
 const SWARM_BG = new THREE.Color(0xa6d3cd);
 const SWARM_BG_LIN = SWARM_BG.clone().convertSRGBToLinear();
 
@@ -958,6 +959,11 @@ let gradCb, micBtn, paneOrb, paneSwarm;
     setTimeout(() => { btn.textContent = 'COPY SETTINGS'; }, 1200);
   };
   paneOrb.appendChild(btn);
+
+  const rbtn = document.createElement('button');
+  rbtn.textContent = 'RESET';
+  rbtn.onclick = () => { resetView(); setBehavior('idle', true); };
+  paneOrb.appendChild(rbtn);
 }
 
 // -------------------------------------------------- swarm tab controls
@@ -974,18 +980,20 @@ const SWARM_SLIDERS = [
   { key: 'gloss',   label: 'Gloss',   min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
 ];
 const SWARM_STYLES = ['WAX', 'TOON', 'POP', 'INK'];
+const sctl = {};        // swarm slider refs, so RESET can drive the UI
+let swarmStyleBtns = [];
 {
   // shading style row: WAX is the lit wax look, the rest are pure graphic
   const srow = document.createElement('div');
   srow.className = 'bgrid';
   srow.style.gridTemplateColumns = 'repeat(4,1fr)';
-  const styleBtns = SWARM_STYLES.map((name, i) => {
+  swarmStyleBtns = SWARM_STYLES.map((name, i) => {
     const b = document.createElement('button');
     b.className = 'bbtn' + (i === 0 ? ' active' : '');
     b.textContent = name;
     b.onclick = () => {
       swarm.material.uniforms.uStyle.value = i;
-      styleBtns.forEach((x, j) => x.classList.toggle('active', j === i));
+      swarmStyleBtns.forEach((x, j) => x.classList.toggle('active', j === i));
     };
     srow.appendChild(b);
     return b;
@@ -1004,6 +1012,7 @@ const SWARM_STYLES = ['WAX', 'TOON', 'POP', 'INK'];
       if (cfg.key === 'scatter') swarm.material.uniforms.uScatter.value = SW.scatter;
       if (cfg.key === 'gloss')   swarm.material.uniforms.uGloss.value = SW.gloss;
     };
+    sctl[cfg.key] = { inp, val, fmt: cfg.fmt };
     row.append(lab, val, inp);
     paneSwarm.appendChild(row);
   });
@@ -1019,6 +1028,26 @@ const SWARM_STYLES = ['WAX', 'TOON', 'POP', 'INK'];
     setTimeout(() => { btn.textContent = 'COPY SETTINGS'; }, 1200);
   };
   paneSwarm.appendChild(btn);
+
+  const rbtn = document.createElement('button');
+  rbtn.textContent = 'RESET';
+  rbtn.onclick = () => {
+    resetView();
+    Object.assign(SW, SW_DEFAULTS);
+    swarm.material.uniforms.uScatter.value = SW.scatter;
+    swarm.material.uniforms.uGloss.value = SW.gloss;
+    swarm.material.uniforms.uStyle.value = 0;
+    swarmStyleBtns.forEach((b, i) => b.classList.toggle('active', i === 0));
+    setSwarmPalette(SWARM_PALETTES[0]);
+    for (const k in sctl) { sctl[k].inp.value = SW[k]; sctl[k].val.textContent = sctl[k].fmt(SW[k]); }
+  };
+  paneSwarm.appendChild(rbtn);
+}
+
+// shared by both RESET buttons: bring the camera home
+function resetView() {
+  camera.position.set(0, 0, 4.4);
+  controls.target.set(0, 0, 0);
 }
 
 // ------------------------------------------------------------ mode tabs
