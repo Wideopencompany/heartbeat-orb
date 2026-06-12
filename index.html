@@ -628,6 +628,66 @@ function swarmSim(dt, t) {
   swarm.instanceMatrix.needsUpdate = true;
 }
 
+// ------------------------------------------------- bead-to-bead links
+// plexus toggle: each bead connects to up to 3 close neighbours with lines
+// in the bead colors, rebuilt every frame as the fluid carries them
+const MAX_LINKS = 9000;
+const LINK_BEADS = 2200;   // link this many beads at most, for speed
+let linksOn = false;
+const linkPos = new Float32Array(MAX_LINKS * 6);
+const linkCol = new Float32Array(MAX_LINKS * 6);
+const linkGeo = new THREE.BufferGeometry();
+linkGeo.setAttribute('position', new THREE.BufferAttribute(linkPos, 3).setUsage(THREE.DynamicDrawUsage));
+linkGeo.setAttribute('color', new THREE.BufferAttribute(linkCol, 3).setUsage(THREE.DynamicDrawUsage));
+const links = new THREE.LineSegments(linkGeo, new THREE.LineBasicMaterial({
+  vertexColors: true, transparent: true, opacity: 0.45, depthWrite: false,
+}));
+links.visible = false;
+links.frustumCulled = false;
+scene.add(links);
+
+function updateLinks() {
+  const n = Math.min(SW.count, LINK_BEADS);
+  // link radius tracks the linked beads' mean spacing on the shell
+  const ld = 1.6 * Math.sqrt(12.57 * SW.shell * SW.shell / Math.max(n, 1));
+  const ld2 = ld * ld, inv = 1 / ld;
+  const grid = new Map();
+  const colors = swarm.instanceColor.array;
+  const perBead = new Uint8Array(n);
+  let seg = 0;
+  for (let i = 0; i < n && seg < MAX_LINKS; i++) {
+    const b = i * 3;
+    const x = swarmPos[b], y = swarmPos[b + 1], z = swarmPos[b + 2];
+    const cx = Math.floor(x * inv), cy = Math.floor(y * inv), cz = Math.floor(z * inv);
+    for (let ox = -1; ox <= 1; ox++)
+    for (let oy = -1; oy <= 1; oy++)
+    for (let oz = -1; oz <= 1; oz++) {
+      const cell = grid.get(((cx + ox) * 73856093) ^ ((cy + oy) * 19349663) ^ ((cz + oz) * 83492791));
+      if (!cell) continue;
+      for (const j of cell) {
+        if (perBead[i] >= 3 || seg >= MAX_LINKS) break;
+        if (perBead[j] >= 4) continue;
+        const bj = j * 3;
+        const dx = x - swarmPos[bj], dy = y - swarmPos[bj + 1], dz = z - swarmPos[bj + 2];
+        if (dx * dx + dy * dy + dz * dz > ld2) continue;
+        const p = seg * 6;
+        linkPos[p] = x; linkPos[p + 1] = y; linkPos[p + 2] = z;
+        linkPos[p + 3] = swarmPos[bj]; linkPos[p + 4] = swarmPos[bj + 1]; linkPos[p + 5] = swarmPos[bj + 2];
+        linkCol[p] = colors[b]; linkCol[p + 1] = colors[b + 1]; linkCol[p + 2] = colors[b + 2];
+        linkCol[p + 3] = colors[bj]; linkCol[p + 4] = colors[bj + 1]; linkCol[p + 5] = colors[bj + 2];
+        perBead[i]++; perBead[j]++; seg++;
+      }
+    }
+    const key = (cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791);
+    let cell = grid.get(key);
+    if (!cell) grid.set(key, cell = []);
+    cell.push(i);
+  }
+  linkGeo.setDrawRange(0, seg * 2);
+  linkGeo.attributes.position.needsUpdate = true;
+  linkGeo.attributes.color.needsUpdate = true;
+}
+
 // --------------------------------------------------------- palette switch
 // colors ease toward the active palette every frame, so swatch clicks,
 // behaviour changes and the THINK hue-cycle glide instead of snapping
@@ -981,7 +1041,7 @@ const SWARM_SLIDERS = [
 ];
 const SWARM_STYLES = ['WAX', 'TOON', 'POP', 'INK'];
 const sctl = {};        // swarm slider refs, so RESET can drive the UI
-let swarmStyleBtns = [];
+let swarmStyleBtns = [], linkBtn;
 {
   // shading style row: WAX is the lit wax look, the rest are pure graphic
   const srow = document.createElement('div');
@@ -999,6 +1059,17 @@ let swarmStyleBtns = [];
     return b;
   });
   paneSwarm.appendChild(srow);
+
+  linkBtn = document.createElement('button');
+  linkBtn.className = 'bbtn';
+  linkBtn.style.marginBottom = '4px';
+  linkBtn.textContent = '⌁ LINKS';
+  linkBtn.onclick = () => {
+    linksOn = !linksOn;
+    links.visible = linksOn && mode === 'swarm';
+    linkBtn.classList.toggle('active', linksOn);
+  };
+  paneSwarm.appendChild(linkBtn);
 
   SWARM_SLIDERS.forEach(cfg => {
     const row = document.createElement('div'); row.className = 'row';
@@ -1039,6 +1110,7 @@ let swarmStyleBtns = [];
     swarm.material.uniforms.uStyle.value = 0;
     swarmStyleBtns.forEach((b, i) => b.classList.toggle('active', i === 0));
     setSwarmPalette(SWARM_PALETTES[0]);
+    linksOn = false; links.visible = false; linkBtn.classList.remove('active');
     for (const k in sctl) { sctl[k].inp.value = SW[k]; sctl[k].val.textContent = sctl[k].fmt(SW[k]); }
   };
   paneSwarm.appendChild(rbtn);
@@ -1057,6 +1129,7 @@ function setMode(m) {
   mode = m;
   orb.visible = ambientPts.visible = m === 'orb';
   swarm.visible = m === 'swarm';
+  links.visible = m === 'swarm' && linksOn;
   paneOrb.style.display = m === 'orb' ? '' : 'none';
   paneSwarm.style.display = m === 'swarm' ? '' : 'none';
   document.getElementById('palettes').style.display = m === 'orb' ? '' : 'none';
@@ -1249,6 +1322,7 @@ function tick() {
 
   if (mode === 'swarm') {
     swarmSim(dt, t);
+    if (linksOn) updateLinks();
     // light-teal daylight backdrop; gentler bloom so the beads stay matte
     scene.background.copy(SWARM_BG);
     grainPass.uniforms.uBg.value.copy(SWARM_BG_LIN);
