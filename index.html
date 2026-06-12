@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Heartbeat Orb</title>
+<style>
+  html, body { margin:0; padding:0; background:#04050a; overflow:hidden; height:100%; }
+  #orb-canvas { width:100vw; height:100vh; display:block; cursor:grab; }
+  #orb-canvas:active { cursor:grabbing; }
+  #palettes {
+    position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+    display:flex; flex-direction:column; align-items:center; gap:8px; z-index:10;
+  }
+  .prow { display:flex; gap:10px; }
+  .swatch {
+    width:28px; height:28px; border-radius:50%; cursor:pointer;
+    border:2px solid rgba(255,255,255,0.15); box-sizing:border-box;
+    transition:transform .15s, border-color .15s;
+  }
+  .swatch:hover { transform:scale(1.2); }
+  .swatch.active { border-color:rgba(255,255,255,0.9); transform:scale(1.15); }
+  #panel {
+    position:fixed; top:16px; right:16px; z-index:10; width:215px;
+    background:rgba(8,10,18,0.72); backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,0.08); border-radius:10px;
+    padding:12px 14px; font:11px/1.5 ui-monospace, Menlo, monospace; color:#9fb2c8;
+    user-select:none;
+  }
+  #panel .row { display:flex; align-items:center; gap:8px; margin:7px 0; }
+  #panel label { flex:0 0 78px; text-transform:uppercase; letter-spacing:.05em; font-size:9.5px; }
+  #panel input[type=range] { flex:1; accent-color:#5ad8c8; height:3px; }
+  #panel .val { flex:0 0 34px; text-align:right; color:#e6f0fa; }
+  #panel button {
+    width:100%; margin-top:8px; padding:6px 0; cursor:pointer;
+    background:rgba(90,216,200,0.12); color:#5ad8c8;
+    border:1px solid rgba(90,216,200,0.35); border-radius:6px;
+    font:10.5px ui-monospace, Menlo, monospace; letter-spacing:.06em;
+  }
+  #panel button:hover { background:rgba(90,216,200,0.25); }
+  #panel .bgrid { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; margin-bottom:4px; }
+  #panel .bbtn {
+    margin-top:0; padding:5px 0; font-size:9px; letter-spacing:.04em;
+    background:rgba(255,255,255,0.05); color:#9fb2c8; border-color:rgba(255,255,255,0.14);
+  }
+  #panel .bbtn:hover { background:rgba(255,255,255,0.12); }
+  #panel .bbtn.active { background:rgba(90,216,200,0.22); color:#5ad8c8; border-color:rgba(90,216,200,0.5); }
+  #panel #micbtn.live { background:rgba(255,80,80,0.2); color:#ff8a7a; border-color:rgba(255,90,80,0.55); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="orb-canvas"></canvas>
+<div id="palettes"></div>
+<div id="panel"></div>
+<script>
+  window.__logs = [];
+  const __ce = console.error;
+  console.error = (...a) => { window.__logs.push('E: ' + a.map(String).join(' ').slice(0, 2000)); __ce(...a); };
+  window.addEventListener('error', e => window.__logs.push('X: ' + e.message));
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ---------------------------------------------------------------- constants
+const N_CELLS = 16;
+const BPM = 52;
+const PERIOD = 60 / BPM;
+const GAP = 0.022;
+const KAPPA = 0.055;
+const R_IN = 0.10;
+
+let seed = 9;
+const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+// -------------------------------------------------------------- palettes
+// Built on color-harmony rules: every lobe sits in one perceptual
+// lightness/chroma band (cohesion), hues run analogous with a single
+// complementary accent (interest), the hero is the deepest anchor, and the
+// core glow is an in-family hue so transmitted light never clashes.
+const PALETTES = [
+  { name: 'Bioluminescence', bg: 0x04050a, hero: 0x2747ee,
+    lobes: [0x3f6dff, 0x35e0c8, 0x4fd877, 0xd84fd8, 0x8a5fff, 0x38b6ff, 0x57e0a8, 0xc94fa8],
+    coreDeep: 0x041029, coreGlow: 0x12616b, lights: [0x33ddff, 0xdd44ff, 0x44ffaa] },
+  { name: 'Aurora', bg: 0x030a08, hero: 0x0bbf7d,
+    lobes: [0x19e8a0, 0x3ff2c8, 0x69f0d8, 0x22c97d, 0x7d5ce8, 0xe86ad8, 0x3fd8f2, 0x9ff07a],
+    coreDeep: 0x02180f, coreGlow: 0x18a06a, lights: [0x3fffc0, 0xa06aff, 0xe070ff] },
+  { name: 'Nebula', bg: 0x070310, hero: 0x5a2fe8,
+    lobes: [0x7a4ff5, 0xb54fe8, 0xe055c0, 0xff6f9e, 0x5a6af8, 0xc97aff, 0x8a3fd8, 0xf05a88],
+    coreDeep: 0x10042a, coreGlow: 0x6a35a0, lights: [0xa050ff, 0xff5aa0, 0x5a7aff] },
+  { name: 'Ember', bg: 0x0a0504, hero: 0xee3d22,
+    lobes: [0xff8c3f, 0xffb347, 0xff6b5e, 0xe8434f, 0xffd24f, 0xff7a8a, 0xe8702a, 0xffaa6a],
+    coreDeep: 0x200603, coreGlow: 0xa04010, lights: [0xffaa40, 0xff5040, 0xffd060] },
+  { name: 'Glacier', bg: 0x03060c, hero: 0x2a5fd8,
+    lobes: [0x6ab8f5, 0x8fd8ff, 0x4f8fe8, 0x7fe8e8, 0xa8c8ff, 0x5fd0f0, 0x3a78d8, 0x9fe8ff],
+    coreDeep: 0x051430, coreGlow: 0x2a7ab0, lights: [0x7ad0ff, 0xa0e8ff, 0xcfe8ff] },
+  { name: 'Orchid', bg: 0x08040a, hero: 0xb82fd8,
+    lobes: [0xe060b0, 0xa85ff0, 0xff7ac8, 0x7a5af0, 0xd84f8a, 0xc070ff, 0xf060d8, 0x8f6af8],
+    coreDeep: 0x1a0520, coreGlow: 0x8a2a78, lights: [0xff60c0, 0xa060ff, 0xff90e0] },
+];
+
+// gradient palettes: 8 lobe colors sampled along a smooth hue ramp (HSL
+// interpolation keeps chroma alive through the middle instead of going gray)
+function grad8(stops) {
+  const cols = stops.map(s => new THREE.Color(s));
+  const out = [];
+  for (let i = 0; i < 8; i++) {
+    const t = (i / 7) * (cols.length - 1);
+    const a = Math.min(Math.floor(t), cols.length - 2);
+    out.push(cols[a].clone().lerpHSL(cols[a + 1], t - a).getHex());
+  }
+  return out;
+}
+PALETTES.push(
+  { name: 'Acid', bg: 0x060a02, hero: 0x1ed400,           // neon green x orange
+    lobes: grad8(['#39ff14', '#ffe600', '#ff7a00']),
+    coreDeep: 0x0a2002, coreGlow: 0x6ab012, lights: [0x66ff33, 0xffaa33, 0xccff33] },
+  { name: 'Sunset', bg: 0x0a0406, hero: 0xe8175a,
+    lobes: grad8(['#ff2e88', '#ff6f3f', '#ffc24f']),
+    coreDeep: 0x240408, coreGlow: 0xa03028, lights: [0xff5a90, 0xff9040, 0xffd060] },
+  { name: 'Lagoon', bg: 0x02080c, hero: 0x0f5fe8,
+    lobes: grad8(['#1f8fff', '#18e0c0', '#7dff9f']),
+    coreDeep: 0x031428, coreGlow: 0x1a7a8a, lights: [0x40a0ff, 0x40ffd0, 0x90ffb0] },
+  { name: 'Dream', bg: 0x05060e, hero: 0x2a35f5,        // from the reference image
+    lobes: grad8(['#00e0f0', '#2a35f5', '#a04ff0', '#f060c0', '#ffa216']),
+    coreDeep: 0x0a1030, coreGlow: 0x3a7ab0, lights: [0x00e0f0, 0xa04ff0, 0xffa216] }
+);
+
+// the five colors of the reference gradient image -- drive the GRAD CORE
+const GRAD_COLORS = ['#00e0f0', '#ffa216', '#2a35f5', '#a04ff0', '#f060c0']
+  .map(c => new THREE.Color(c));
+
+// monochromatic palettes: one hue per palette, pieces varied only in
+// lightness/saturation -- tonal variations like the Ember favourite
+function monoPalette(name, hex) {
+  const hsl = {}; new THREE.Color(hex).getHSL(hsl);
+  const mk = (l, s) => new THREE.Color().setHSL(hsl.h, s ?? hsl.s, l).getHex();
+  return {
+    name, bg: mk(0.025, hsl.s * 0.5), hero: mk(0.30, 1.0),
+    lobes: [mk(0.50), mk(0.42), mk(0.58), mk(0.38), mk(0.54), mk(0.46), mk(0.62), mk(0.40)],
+    coreDeep: mk(0.08), coreGlow: mk(0.28), lights: [mk(0.60), mk(0.50), mk(0.72)],
+  };
+}
+const MONO = [
+  monoPalette('Mono Ember',   '#ff5a28'),
+  monoPalette('Mono Gold',    '#ffb300'),
+  monoPalette('Mono Lime',    '#9ee82a'),
+  monoPalette('Mono Emerald', '#16d06a'),
+  monoPalette('Mono Cyan',    '#19d3e6'),
+  monoPalette('Mono Azure',   '#2a6bff'),
+  monoPalette('Mono Violet',  '#8a4bff'),
+  monoPalette('Mono Magenta', '#ff3fae'),
+];
+const ALL_PALETTES = [...PALETTES, ...MONO];
+
+// ------------------------------------------------------------ cell centers
+const centers = [];
+{
+  const ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < N_CELLS; i++) {
+    const y = 1 - (i / (N_CELLS - 1)) * 2;
+    const r = Math.sqrt(1 - y * y);
+    const th = ga * i;
+    const v = new THREE.Vector3(Math.cos(th) * r, y, Math.sin(th) * r);
+    v.x += (rnd() - 0.5) * 0.22; v.y += (rnd() - 0.5) * 0.22; v.z += (rnd() - 0.5) * 0.22;
+    v.normalize();
+    centers.push(v);
+  }
+}
+let hero = 0; {
+  let bd = 1e9; const target = new THREE.Vector3(-0.35, 0.05, 0.95).normalize();
+  centers.forEach((c, i) => { const d = c.distanceTo(target); if (d < bd) { bd = d; hero = i; } });
+}
+const weights = centers.map((_, i) => (i === hero ? 0.20 : 0));
+
+// contraction wave: wider spread so the spasm visibly starts on one side
+// and ripples across the orb
+const apex = new THREE.Vector3(-0.5, 0.6, 0.62).normalize();
+const delays = centers.map(c => (1 - c.dot(apex)) * 0.5 * 0.55);
+
+// neighbour graph -> springs push/pull each other = soft-body collisions
+const neighbors = centers.map((c, i) =>
+  centers.map((d, j) => j).filter(j => j !== i && centers[i].angleTo(centers[j]) < 1.0)
+);
+
+// ------------------------------------------------------------ spring state
+const cellX = new Float32Array(N_CELLS), cellV = new Float32Array(N_CELLS);
+let globalX = 0, globalV = 0;
+
+function heartForce(s) {
+  const g = (t, c, w) => Math.exp(-((t - c) * (t - c)) / (w * w));
+  return 1.00 * g(s, 0.00, 0.040) + 0.55 * g(s, 0.165, 0.050);
+}
+
+// ------------------------------------------------------------------ scene
+const canvas = document.getElementById('orb-canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PALETTES[0].bg);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 50);
+camera.position.set(0, 0, 4.4);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.enablePan = false;
+controls.minDistance = 2.2;
+controls.maxDistance = 42;   // zoom all the way out to icon size
+controls.rotateSpeed = 0.6;
+
+const orb = new THREE.Group();
+scene.add(orb);
+
+// ----------------------------------------------- pillow-lobe geometry
+const _nj = new THREE.Vector3(), _dir = new THREE.Vector3(), _P = new THREE.Vector3();
+
+function makeLobeGeometry(i, rOut, lat) {
+  const ci = centers[i];
+  const up = Math.abs(ci.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const T1 = new THREE.Vector3().crossVectors(ci, up).normalize();
+  const T2 = new THREE.Vector3().crossVectors(ci, T1);
+
+  const geo = new THREE.SphereGeometry(1, 56, 40);
+  const pos = geo.attributes.position;
+
+  for (let v = 0; v < pos.count; v++) {
+    const ux = pos.getX(v), uy = pos.getY(v), uz = pos.getZ(v);
+    const h = (uz + 1) / 2;
+    const taper = 0.16 + 0.84 * Math.pow(h, 1.25);
+    const along = R_IN + (rOut - R_IN) * h;
+
+    _P.copy(ci).multiplyScalar(along)
+      .addScaledVector(T1, ux * lat * taper)
+      .addScaledVector(T2, uy * lat * taper);
+
+    for (let j = 0; j < N_CELLS; j++) {
+      if (j === i || centers[j].angleTo(ci) > 1.7) continue;
+      _nj.subVectors(centers[j], ci).normalize();
+      const r = _P.length();
+      _dir.copy(_P).divideScalar(r);
+      const e = _dir.dot(_nj) + GAP - (weights[i] - weights[j]) * 0.5;
+      if (e > -0.3) {
+        const sm = KAPPA * Math.log(1 + Math.exp(e / KAPPA));
+        _P.addScaledVector(_nj, -sm * r);
+      }
+    }
+
+    const r2 = _P.length();
+    const x = r2 / rOut;
+    const rNew = rOut * x / Math.pow(1 + Math.pow(x, 9), 1 / 9);
+    _P.multiplyScalar(rNew / r2);
+
+    pos.setXYZ(v, _P.x, _P.y, _P.z);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// --------------------------------------------------------------- materials
+const lobes = [];
+const sharedT = { value: 0 }, sharedGlob = { value: 0 };
+const lobeU = [];
+
+for (let i = 0; i < N_CELLS; i++) {
+  const rOut = (i === hero ? 1.05 : 0.95 + rnd() * 0.09);
+  const lat = 0.95 * (0.9 + rnd() * 0.2);
+
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,              // tinted by applyPalette below
+    metalness: 0,
+    roughness: 0.42,
+    transmission: 1.0,
+    thickness: 0.55,
+    ior: 1.38,
+    attenuationDistance: 1.5,
+    iridescence: 1.0,
+    iridescenceIOR: 1.32,
+    iridescenceThicknessRange: [120, 420],
+    clearcoat: 0.6,
+    clearcoatRoughness: 0.28,
+    emissiveIntensity: 0.04,
+    envMapIntensity: 0.42,
+  });
+
+  // soft-body deformation injected into the physical material's vertex shader
+  const u = { beat: { value: 0 }, vel: { value: 0 } };
+  lobeU.push(u);
+  const axis = centers[i].clone();
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uAxis = { value: axis };
+    shader.uniforms.uBeat = u.beat;
+    shader.uniforms.uVel  = u.vel;
+    shader.uniforms.uGlob = sharedGlob;
+    shader.uniforms.uT    = sharedT;
+    shader.vertexShader = `
+      uniform vec3 uAxis; uniform float uBeat; uniform float uVel;
+      uniform float uGlob; uniform float uT;
+    ` + shader.vertexShader.replace('#include <begin_vertex>', `
+      #include <begin_vertex>
+      {
+        float along = dot(transformed, uAxis);
+        vec3 lateral = transformed - uAxis * along;
+        float h = smoothstep(0.12, 1.0, along);
+        // big systole: cap extrudes far and the pillow widens hard into its
+        // neighbours -- pieces visibly press and bounce off each other
+        float pump = (uBeat + uGlob * 0.5) * h;
+        transformed += uAxis * pump * 0.34;
+        transformed += lateral * pump * 0.75;
+        // jelly ripple driven by spring velocity
+        float wob = uVel * 0.030 * sin(along * 9.0 - uT * 13.0);
+        transformed += lateral * wob * h;
+      }
+    `);
+  };
+
+  const lobe = new THREE.Mesh(makeLobeGeometry(i, rOut, lat), mat);
+  orb.add(lobe);
+  lobes.push(lobe);
+}
+
+// ------------------------------------------- glowing heart deep inside
+const heartU = {
+  uTime: { value: 0 }, uBeat: { value: 0 }, uMode: { value: 0 },
+  uDeep: { value: new THREE.Color(PALETTES[0].coreDeep) },
+  uGlow: { value: new THREE.Color(PALETTES[0].coreGlow) },
+  uGradCols: { value: GRAD_COLORS.map(c => c.clone().convertSRGBToLinear()) },
+};
+const heartGlow = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(0.55, 4),
+  new THREE.ShaderMaterial({
+    uniforms: heartU,
+    vertexShader: /* glsl */`
+      uniform float uTime; uniform float uBeat;
+      varying vec3 vN; varying vec3 vP; varying vec3 vD;
+      float h(vec3 p){ return fract(sin(dot(p, vec3(127.1,311.7,74.7)))*43758.5453); }
+      float n3(vec3 p){ vec3 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+        return mix(mix(mix(h(i),h(i+vec3(1,0,0)),f.x), mix(h(i+vec3(0,1,0)),h(i+vec3(1,1,0)),f.x),f.y),
+                   mix(mix(h(i+vec3(0,0,1)),h(i+vec3(1,0,1)),f.x), mix(h(i+vec3(0,1,1)),h(i+vec3(1,1,1)),f.x),f.y), f.z); }
+      void main(){
+        vec3 p = normalize(position);
+        float lump = n3(p*3.5 + uTime*0.08) * 0.10 + uBeat * 0.10;
+        vec3 q = p * 0.55 * (1.0 + lump);
+        vD = p; vN = normalMatrix * p; vP = (modelViewMatrix * vec4(q,1.0)).xyz;
+        gl_Position = projectionMatrix * vec4(vP, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uTime; uniform float uBeat; uniform float uMode;
+      uniform vec3 uDeep; uniform vec3 uGlow;
+      uniform vec3 uGradCols[5];
+      varying vec3 vN; varying vec3 vP; varying vec3 vD;
+      float h(vec3 p){ return fract(sin(dot(p, vec3(127.1,311.7,74.7)))*43758.5453); }
+      float n3(vec3 p){ vec3 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+        return mix(mix(mix(h(i),h(i+vec3(1,0,0)),f.x), mix(h(i+vec3(0,1,0)),h(i+vec3(1,1,0)),f.x),f.y),
+                   mix(mix(h(i+vec3(0,0,1)),h(i+vec3(1,0,1)),f.x), mix(h(i+vec3(0,1,1)),h(i+vec3(1,1,1)),f.x),f.y), f.z); }
+      void main(){
+        vec3 n = normalize(vN), v = normalize(-vP);
+        float fres = pow(1.0 - max(dot(n,v),0.0), 1.4);
+        float murk = n3(vD*4.5 + uTime*0.12);
+        vec3 col = mix(uDeep, uGlow, fres) + murk * uGlow * 0.35;
+        if (uMode > 0.5) {
+          // moving gradient: five colored light-blobs drifting on slow,
+          // incommensurate orbits, blended like the reference image
+          float T = uTime * 0.6;
+          vec3 d0 = normalize(vec3(sin(T*0.21),      cos(T*0.17),      sin(T*0.13+1.7)));
+          vec3 d1 = normalize(vec3(cos(T*0.15+2.0),  sin(T*0.19+0.6),  cos(T*0.11)));
+          vec3 d2 = normalize(vec3(sin(T*0.12+4.0),  sin(T*0.16+2.5),  cos(T*0.18+1.0)));
+          vec3 d3 = normalize(vec3(cos(T*0.17+1.2),  cos(T*0.13+3.1),  sin(T*0.15+0.4)));
+          vec3 d4 = normalize(vec3(sin(T*0.19+5.1),  cos(T*0.21+1.9),  sin(T*0.14+2.8)));
+          float w0 = pow(max(dot(vD,d0),0.0)*0.5+0.5, 4.0);
+          float w1 = pow(max(dot(vD,d1),0.0)*0.5+0.5, 4.0);
+          float w2 = pow(max(dot(vD,d2),0.0)*0.5+0.5, 4.0);
+          float w3 = pow(max(dot(vD,d3),0.0)*0.5+0.5, 4.0);
+          float w4 = pow(max(dot(vD,d4),0.0)*0.5+0.5, 4.0);
+          vec3 acc = uGradCols[0]*w0 + uGradCols[1]*w1 + uGradCols[2]*w2
+                   + uGradCols[3]*w3 + uGradCols[4]*w4;
+          col = acc / (w0+w1+w2+w3+w4) * (0.50 + murk*0.25);
+        }
+        col *= 1.0 + uBeat * 2.2;
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  })
+);
+orb.add(heartGlow);
+
+const innerLights = [
+  new THREE.PointLight(0xffffff, 5.0, 4, 1.8),
+  new THREE.PointLight(0xffffff, 3.6, 4, 1.8),
+  new THREE.PointLight(0xffffff, 3.0, 4, 1.8),
+];
+innerLights[0].position.set(-0.2, 0.22, 0.25);
+innerLights[1].position.set(0.25, -0.15, -0.15);
+innerLights[2].position.set(0.05, -0.25, 0.28);
+innerLights.forEach(l => orb.add(l));
+
+// ------------------------------------------------------- ambient particles
+let particlesMat;
+{
+  const n = 220, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() - 0.5) * 14;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  particlesMat = new THREE.PointsMaterial({
+    color: 0x3a5a7a, size: 0.02, transparent: true, opacity: 0.5,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  scene.add(new THREE.Points(g, particlesMat));
+}
+
+// --------------------------------------------------------- proton orbiters
+// little white satellites on randomized elliptical orbital planes
+const MAX_PROTONS = 24;
+const protons = [];
+{
+  const pGeo = new THREE.SphereGeometry(0.035, 16, 12);
+  const pMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  for (let i = 0; i < MAX_PROTONS; i++) {
+    const n = new THREE.Vector3(rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1).normalize();
+    const up = Math.abs(n.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const A = new THREE.Vector3().crossVectors(n, up).normalize();
+    const B = new THREE.Vector3().crossVectors(n, A);
+    const mesh = new THREE.Mesh(pGeo, pMat);
+    mesh.userData = {
+      A, B,
+      rBase: 0.72 + rnd() * 0.45,       // x orbit-radius slider
+      speed: (0.5 + rnd() * 0.9) * (rnd() > 0.5 ? 1 : -1),
+      th: rnd() * Math.PI * 2,          // accumulated angle: P-Speed changes stay smooth
+      ecc: 0.78 + rnd() * 0.22,         // slightly elliptical
+    };
+    scene.add(mesh);
+    protons.push(mesh);
+  }
+}
+
+// --------------------------------------------------------- palette switch
+// colors ease toward the active palette every frame, so swatch clicks,
+// behaviour changes and the THINK hue-cycle glide instead of snapping
+function paletteTargets(p) {
+  return {
+    tints: centers.map((_, i) => new THREE.Color(i === hero ? p.hero : p.lobes[i % p.lobes.length])),
+    coreDeep: new THREE.Color(p.coreDeep),
+    coreGlow: new THREE.Color(p.coreGlow),
+    lights: p.lights.map(c => new THREE.Color(c)),
+    bg: new THREE.Color(p.bg),
+  };
+}
+const WHITE = new THREE.Color(0xffffff);
+const _bgLin = new THREE.Color();
+let activePalette = PALETTES[0];
+let palTarget = paletteTargets(activePalette);
+const palCur = paletteTargets(activePalette);
+
+function lerpPalette(k) {
+  palCur.tints.forEach((c, i) => c.lerp(palTarget.tints[i], k));
+  palCur.coreDeep.lerp(palTarget.coreDeep, k);
+  palCur.coreGlow.lerp(palTarget.coreGlow, k);
+  palCur.lights.forEach((c, i) => c.lerp(palTarget.lights[i], k));
+  palCur.bg.lerp(palTarget.bg, k);
+
+  for (let i = 0; i < N_CELLS; i++) {
+    const m = lobes[i].material, tint = palCur.tints[i];
+    m.color.copy(tint).lerp(WHITE, 0.38);
+    m.attenuationColor.copy(tint);
+    m.emissive.copy(tint);
+  }
+  heartU.uDeep.value.copy(palCur.coreDeep);
+  heartU.uGlow.value.copy(palCur.coreGlow);
+  innerLights.forEach((l, i) => l.color.copy(palCur.lights[i]));
+  scene.background.copy(palCur.bg);
+  particlesMat.color.copy(palCur.lights[0]).multiplyScalar(0.45);
+  grainPass.uniforms.uBg.value.copy(_bgLin.copy(palCur.bg).convertSRGBToLinear());
+}
+
+function setPalette(p) {
+  activePalette = p;
+  palTarget = paletteTargets(p);
+  document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+  if (swatchEls[p.name]) swatchEls[p.name].classList.add('active');
+}
+
+// THINK mode drifts a monochrome palette around the hue wheel, passing
+// through every Mono swatch family on the way
+function monoHuePalette(h) {
+  const mk = (l, s = 0.85) => new THREE.Color().setHSL(h, s, l).getHex();
+  return {
+    name: 'cycle', bg: mk(0.025, 0.42), hero: mk(0.30, 1.0),
+    lobes: [mk(0.50), mk(0.42), mk(0.58), mk(0.38), mk(0.54), mk(0.46), mk(0.62), mk(0.40)],
+    coreDeep: mk(0.08), coreGlow: mk(0.28), lights: [mk(0.60), mk(0.50), mk(0.72)],
+  };
+}
+
+// swatch UI: top row = multicolor palettes, bottom row = monochromatic
+const swatchEls = {};
+{
+  const bar = document.getElementById('palettes');
+  const row1 = document.createElement('div'); row1.className = 'prow';
+  const row2 = document.createElement('div'); row2.className = 'prow';
+  const addSwatch = (p, row) => {
+    const el = document.createElement('div');
+    el.className = 'swatch';
+    el.title = p.name;
+    const cs = [p.hero, p.lobes[1], p.lobes[3], p.lobes[5]]
+      .map(c => '#' + c.toString(16).padStart(6, '0'));
+    el.style.background = `linear-gradient(135deg, ${cs[0]} 0%, ${cs[1]} 35%, ${cs[2]} 65%, ${cs[3]} 100%)`;
+    el.onclick = () => { hueCycleOn = false; setPalette(p); };
+    swatchEls[p.name] = el;
+    row.appendChild(el);
+  };
+  PALETTES.forEach(p => addSwatch(p, row1));
+  MONO.forEach(p => addSwatch(p, row2));
+  bar.append(row1, row2);
+}
+
+// ---------------------------------------------------------------- post fx
+// MSAA render target: the antialias flag on the renderer does nothing once
+// rendering goes through a composer, so multisample the composer's target
+const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+const msaaRT = new THREE.WebGLRenderTarget(size.x, size.y, {
+  samples: 4, type: THREE.HalfFloatType,
+});
+const composer = new EffectComposer(renderer, msaaRT);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(1, 1), 0.38, 0.85, 0.6));
+
+// animated film grain, weighted into the shadows for an organic finish
+const GrainShader = {
+  uniforms: {
+    tDiffuse: { value: null }, uTime: { value: 0 },
+    uAmount: { value: 0.055 }, uContrast: { value: 1.0 },
+    uBg: { value: new THREE.Color(PALETTES[0].bg).convertSRGBToLinear() },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uAmount;
+    uniform float uContrast; uniform vec3 uBg;
+    varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    void main(){
+      vec4 c = texture2D(tDiffuse, vUv);
+      // object mask: how far this pixel is from the background color, so
+      // grading touches only the orb, never the backdrop
+      float objMask = smoothstep(0.008, 0.06, distance(c.rgb, uBg));
+      // contrast pivots at the BACKGROUND color -> bg pixels stay identical
+      c.rgb = mix(c.rgb, (c.rgb - uBg) * uContrast + uBg, objMask);
+      float g = h(vUv * 1234.5 + mod(uTime, 10.0) * 61.7);
+      float luma = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb += (g - 0.5) * uAmount * (1.0 - luma * 0.55) * objMask;
+      gl_FragColor = c;
+    }`,
+};
+const grainPass = new ShaderPass(GrainShader);
+composer.addPass(grainPass);
+window.__grain = grainPass;
+const bloomPass = composer.passes[1];
+
+// ------------------------------------------------------------ tuning panel
+const S = {
+  spasm: 1.11, glow: 0.74, contrast: 1.0, transparency: 0.85, grain: 0,
+  refraction: 1.20, gradcore: true,
+  protons: 12, pspeed: 0.45, porbit: 1.63, psize: 0.39,
+};
+const SLIDERS = [
+  { key: 'spasm',        label: 'Spasm',    min: 0,    max: 5,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'glow',         label: 'Glow',     min: 0,    max: 3,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'contrast',     label: 'Contrast', min: 0.5,  max: 1.6,  step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'transparency', label: 'Transpar', min: 0.05, max: 1,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'grain',        label: 'Grain',    min: 0,    max: 0.2,  step: 0.001, fmt: v => v.toFixed(3) },
+  { key: 'refraction',   label: 'Refract',  min: 1.0,  max: 2.33, step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'protons',      label: 'Protons',  min: 0,    max: 24,   step: 1,     fmt: v => v.toFixed(0) },
+  { key: 'pspeed',       label: 'P-Speed',  min: 0,    max: 3,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'porbit',       label: 'P-Orbit',  min: 1.4,  max: 5,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'psize',        label: 'P-Size',   min: 0.2,  max: 3,    step: 0.01,  fmt: v => v.toFixed(2) },
+];
+
+// ------------------------------------------------------------- behaviours
+// clickable moods: each one retargets the sliders, palette, heartbeat rate,
+// rotation speed and breathing -- everything eases over in ~a second
+const BEHAVIORS = {
+  idle: {   // calm resting state -- the default on load
+    label: 'IDLE', palette: 'Mono Cyan', gradcore: true, bpm: 52, rot: 1.0, breathe: 0,
+    sliders: { spasm: 1.11, glow: 0.74, contrast: 1.00, transparency: 0.85, grain: 0,
+               refraction: 1.20, protons: 12, pspeed: 0.45, porbit: 1.63, psize: 0.39 },
+  },
+  thinking: {  // churning hard: big spasms, protons flung wide, hue drifts
+    label: 'THINK', palette: 'Mono Cyan', gradcore: true, bpm: 74, rot: 1.6, breathe: 0, hueCycle: true,
+    sliders: { spasm: 3.38, glow: 0.74, contrast: 1.00, transparency: 0.85, grain: 0,
+               refraction: 1.20, protons: 12, pspeed: 1.46, porbit: 3.07, psize: 0.39 },
+  },
+  excited: {   // racing heart, warm colors, a swarm of fast protons
+    label: 'EXCITED', palette: 'Sunset', gradcore: true, bpm: 112, rot: 2.4, breathe: 0,
+    sliders: { spasm: 4.4, glow: 1.7, contrast: 1.08, transparency: 0.80, grain: 0,
+               refraction: 1.25, protons: 24, pspeed: 2.6, porbit: 2.0, psize: 0.55 },
+  },
+  sleepy: {    // 30bpm, dim, slow drift, whole orb breathes like a sleeper
+    label: 'SLEEPY', palette: 'Mono Azure', gradcore: false, bpm: 30, rot: 0.22, breathe: 0.045,
+    sliders: { spasm: 0.5, glow: 0.32, contrast: 0.92, transparency: 0.95, grain: 0.05,
+               refraction: 1.30, protons: 3, pspeed: 0.10, porbit: 1.5, psize: 0.30 },
+  },
+  alert: {     // red, sharp, high contrast, protons in tight fast shield orbits
+    label: 'ALERT', palette: 'Mono Ember', gradcore: false, bpm: 96, rot: 1.3, breathe: 0,
+    sliders: { spasm: 2.8, glow: 1.35, contrast: 1.25, transparency: 0.70, grain: 0,
+               refraction: 1.20, protons: 18, pspeed: 2.3, porbit: 1.45, psize: 0.50 },
+  },
+};
+
+let behavior = 'idle';
+let hueCycleOn = false, hueT = 0.52;   // start the cycle at cyan
+const targetS = { ...S };
+const tw  = { bpm: 52, rot: 1, breathe: 0 };   // current (tweened)
+const tgt = { bpm: 52, rot: 1, breathe: 0 };   // target
+
+function setBehavior(name, instant = false) {
+  behavior = name;
+  const B = BEHAVIORS[name];
+  Object.assign(targetS, B.sliders);
+  tgt.bpm = B.bpm; tgt.rot = B.rot; tgt.breathe = B.breathe;
+  S.gradcore = B.gradcore;
+  gradCb.checked = B.gradcore;
+  heartU.uMode.value = B.gradcore ? 1 : 0;
+  hueCycleOn = !!B.hueCycle;
+  if (hueCycleOn)
+    document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+  else
+    setPalette(ALL_PALETTES.find(p => p.name === B.palette));
+  for (const [k, b] of Object.entries(behaviorBtns)) b.classList.toggle('active', k === name);
+  if (instant) {
+    Object.assign(S, targetS);
+    Object.assign(tw, tgt);
+    lerpPalette(1);
+    syncSliderUI();
+    applySettings();
+  }
+}
+
+function syncSliderUI() {
+  for (const k in ctl) { ctl[k].inp.value = S[k]; ctl[k].val.textContent = ctl[k].fmt(S[k]); }
+}
+
+// ------------------------------------------------------------------- mic
+// live microphone level feeds extra force into the springs, so the orb
+// jolts and jellies along with voice or music
+let micOn = false, micStream = null, micAnalyser = null, micBuf = null;
+let audioLvl = 0, audioAvg = 0;
+
+async function toggleMic() {
+  if (micOn) {
+    micOn = false;
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null; micAnalyser = null;
+    audioLvl = audioAvg = 0;
+    micBtn.textContent = '🎤 MIC';
+    micBtn.classList.remove('live');
+    return;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    await ac.resume();
+    micAnalyser = ac.createAnalyser();
+    micAnalyser.fftSize = 1024;
+    micAnalyser.smoothingTimeConstant = 0.55;
+    ac.createMediaStreamSource(micStream).connect(micAnalyser);
+    micBuf = new Uint8Array(micAnalyser.frequencyBinCount);
+    micOn = true;
+    micBtn.textContent = '🎤 LIVE';
+    micBtn.classList.add('live');
+  } catch (e) {
+    micBtn.textContent = 'MIC ✗';
+    setTimeout(() => { micBtn.textContent = '🎤 MIC'; }, 1500);
+  }
+}
+
+function applySettings() {
+  for (const l of lobes) {
+    l.material.transmission = S.transparency;
+    l.material.ior = S.refraction;
+  }
+  bloomPass.strength = 0.38 * S.glow;
+  grainPass.uniforms.uAmount.value = S.grain;
+  grainPass.uniforms.uContrast.value = S.contrast;
+}
+
+function settingsText() {
+  return [
+    'ORB SETTINGS',
+    `behavior: ${behavior}`,
+    `palette: ${activePalette.name}`,
+    ...SLIDERS.map(s => `${s.key}: ${s.fmt(S[s.key])}`),
+    `gradcore: ${S.gradcore ? 'on' : 'off'}`,
+  ].join('\n');
+}
+
+const ctl = {};   // slider input/readout refs, so behaviours can drive the UI
+const behaviorBtns = {};
+let gradCb, micBtn;
+{
+  const panel = document.getElementById('panel');
+
+  const grid = document.createElement('div'); grid.className = 'bgrid';
+  for (const [key, B] of Object.entries(BEHAVIORS)) {
+    const b = document.createElement('button');
+    b.className = 'bbtn'; b.textContent = B.label;
+    b.onclick = () => setBehavior(key);
+    behaviorBtns[key] = b;
+    grid.appendChild(b);
+  }
+  micBtn = document.createElement('button');
+  micBtn.className = 'bbtn'; micBtn.id = 'micbtn'; micBtn.textContent = '🎤 MIC';
+  micBtn.onclick = toggleMic;
+  grid.appendChild(micBtn);
+  panel.appendChild(grid);
+
+  SLIDERS.forEach(cfg => {
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = cfg.label;
+    const inp = document.createElement('input');
+    inp.type = 'range'; inp.min = cfg.min; inp.max = cfg.max; inp.step = cfg.step; inp.value = S[cfg.key];
+    const val = document.createElement('span'); val.className = 'val'; val.textContent = cfg.fmt(S[cfg.key]);
+    // manual drag pins target = value, so the behaviour tween won't fight it
+    inp.oninput = () => { S[cfg.key] = targetS[cfg.key] = parseFloat(inp.value); val.textContent = cfg.fmt(S[cfg.key]); applySettings(); };
+    ctl[cfg.key] = { inp, val, fmt: cfg.fmt };
+    row.append(lab, inp, val);
+    panel.appendChild(row);
+  });
+  // gradient-core toggle: moving multicolor light inside the orb
+  const trow = document.createElement('div'); trow.className = 'row';
+  const tlab = document.createElement('label'); tlab.textContent = 'Grad core';
+  gradCb = document.createElement('input'); gradCb.type = 'checkbox';
+  gradCb.onchange = () => { S.gradcore = gradCb.checked; heartU.uMode.value = gradCb.checked ? 1 : 0; };
+  trow.append(tlab, gradCb);
+  panel.appendChild(trow);
+
+  const btn = document.createElement('button');
+  btn.textContent = 'COPY SETTINGS';
+  btn.onclick = async () => {
+    const txt = settingsText();
+    try { await navigator.clipboard.writeText(txt); btn.textContent = 'COPIED ✓'; }
+    catch { window.prompt('Copy settings:', txt.replace(/\n/g, ' | ')); }
+    setTimeout(() => { btn.textContent = 'COPY SETTINGS'; }, 1200);
+  };
+  panel.appendChild(btn);
+}
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  composer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+// ------------------------------------------------------------------- loop
+const clock = new THREE.Clock();
+let beatT = 0, rotY = 0, rotPhase = 0;
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 1 / 30);
+  const t = clock.elapsedTime;
+
+  // ease sliders + behaviour params toward their targets (~1s glide)
+  const ease = 1 - Math.exp(-dt * 2.5);
+  let moving = false;
+  for (const cfg of SLIDERS) {
+    const k = cfg.key, d = targetS[k] - S[k];
+    if (Math.abs(d) > 1e-4) { S[k] += d * ease; moving = true; }
+  }
+  if (moving) { syncSliderUI(); applySettings(); }
+  tw.bpm += (tgt.bpm - tw.bpm) * ease;
+  tw.rot += (tgt.rot - tw.rot) * ease;
+  tw.breathe += (tgt.breathe - tw.breathe) * ease;
+
+  beatT = (beatT + dt) % (60 / tw.bpm);
+
+  // THINK: drift the monochrome palette around the hue wheel
+  if (hueCycleOn) {
+    hueT = (hueT + dt * 0.05) % 1;
+    palTarget = paletteTargets(monoHuePalette(hueT));
+  }
+  lerpPalette(Math.min(1, dt * 4));
+
+  // microphone level above its own running average -> force on the springs
+  let audio = 0;
+  if (micOn && micAnalyser) {
+    micAnalyser.getByteFrequencyData(micBuf);
+    let sum = 0; const n = micBuf.length >> 1;
+    for (let i = 0; i < n; i++) sum += micBuf[i];
+    const lvl = sum / n / 255;
+    audioLvl += (lvl - audioLvl) * Math.min(1, dt * 16);
+    audioAvg += (audioLvl - audioAvg) * Math.min(1, dt * 1.0);
+    audio = Math.max(0, audioLvl * 2.4 - audioAvg * 1.4);
+  }
+  const beatScale = micOn ? 0.35 : 1;   // sound takes over from the heartbeat
+
+  globalV += (-120 * globalX - 9.0 * globalV
+              + heartForce(beatT) * 16.0 * S.spasm * beatScale
+              + audio * 70 * Math.max(S.spasm, 0.8)) * dt;
+  globalX += globalV * dt;
+
+  for (let i = 0; i < N_CELLS; i++) {
+    // collision coupling: inflated neighbours shove this piece's spring,
+    // so the spasm visibly transfers from piece to piece
+    let shove = 0;
+    for (const j of neighbors[i]) shove += cellX[j] - cellX[i];
+    cellV[i] += (-85 * cellX[i] - 5.5 * cellV[i]
+                 + heartForce(beatT - delays[i]) * 17.0 * S.spasm * beatScale
+                 + audio * (45 + 20 * Math.sin(i * 2.7))
+                 + shove * 10.0) * dt;
+    cellX[i] += cellV[i] * dt;
+
+    lobeU[i].beat.value = cellX[i] + 0.015 * Math.sin(t * 1.6 + i * 13.7);
+    lobeU[i].vel.value = cellV[i];
+    lobes[i].material.emissiveIntensity = (0.04 + Math.max(cellX[i], 0) * 0.9) * S.glow;
+  }
+  sharedT.value = t;
+  sharedGlob.value = globalX;
+
+  const flare = Math.max(globalX, 0) + audio * 0.6;
+  heartU.uTime.value = t;
+  heartU.uBeat.value = flare;
+  heartGlow.scale.setScalar(1 + flare * 0.35);
+  innerLights.forEach((l, i) => {
+    l.intensity = [5.0, 3.6, 3.0][i] * (1 + flare * 2.5) * S.glow;
+    if (S.gradcore) {
+      // cycle the inner lights through the gradient colors, offset per light
+      const u = (t * 0.10 + i * 1.67) % GRAD_COLORS.length;
+      const a = Math.floor(u), f = u - a;
+      l.color.copy(GRAD_COLORS[a]).lerp(GRAD_COLORS[(a + 1) % GRAD_COLORS.length], f);
+    }
+  });
+
+  grainPass.uniforms.uTime.value = t;
+
+  // proton orbiters
+  for (let i = 0; i < MAX_PROTONS; i++) {
+    const m = protons[i], d = m.userData;
+    m.visible = i < S.protons;
+    if (!m.visible) continue;
+    d.th += dt * d.speed * S.pspeed;
+    const r = d.rBase * S.porbit;
+    m.position.set(0, 0, 0)
+      .addScaledVector(d.A, Math.cos(d.th) * r * d.ecc)
+      .addScaledVector(d.B, Math.sin(d.th) * r);
+    m.scale.setScalar(S.psize);
+  }
+
+  // rotation accumulates so behaviour speed changes don't snap the pose
+  rotY += dt * 0.16 * tw.rot;
+  rotPhase += dt * tw.rot;
+  orb.rotation.y = rotY;
+  orb.rotation.x = Math.sin(rotPhase * 0.13) * 0.18;
+  orb.rotation.z = Math.cos(rotPhase * 0.09) * 0.08;
+  orb.scale.setScalar(1 + tw.breathe * Math.sin(t * 0.7));   // SLEEPY breathing
+
+  controls.update();
+  composer.render();
+}
+setBehavior('idle', true);   // idle IS the default on load
+tick();
+</script>
+</body>
+</html>
