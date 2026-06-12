@@ -20,6 +20,10 @@
   }
   .swatch:hover { transform:scale(1.2); }
   .swatch.active { border-color:rgba(255,255,255,0.9); transform:scale(1.15); }
+  #spalettes {
+    position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+    display:none; gap:10px; z-index:10;
+  }
   #tabs { position:fixed; top:16px; left:16px; z-index:10; display:flex; gap:6px; }
   #tabs button {
     padding:6px 14px; cursor:pointer; font:10.5px ui-monospace, Menlo, monospace;
@@ -68,6 +72,7 @@
 <canvas id="orb-canvas"></canvas>
 <div id="tabs"></div>
 <div id="palettes"></div>
+<div id="spalettes"></div>
 <div id="panel"></div>
 <script>
   window.__logs = [];
@@ -466,7 +471,7 @@ const protons = [];
 // a divergence-free flow so they orbit the shell in fluid sheets
 const MAX_SWARM = 16000;
 const SW = { count: 7000, size: 1.0, flow: 0.85, scale: 2.2, speed: 1.0,
-             spin: 0.55, shell: 1.05, spread: 0.14, scatter: 1.0 };
+             spin: 0.55, shell: 1.05, spread: 0.14, scatter: 1.0, gloss: 0.9 };
 const SWARM_BG = new THREE.Color(0xa6d3cd);
 const SWARM_BG_LIN = SWARM_BG.clone().convertSRGBToLinear();
 
@@ -482,18 +487,32 @@ for (let i = 0; i < MAX_SWARM; i++) {
   swarmScl[i] = 0.55 + rnd() * 1.1;
 }
 
-// dusty pinks and creams with sparse maroon/slate accents, as in the reference
-const SWARM_TINTS = ['#f4ece0', '#eccfc4', '#dca4ac', '#c87e92', '#a25670',
-                     '#5e2c3a', '#4a5a6a', '#8aa8b6']
-  .map(c => new THREE.Color(c).convertSRGBToLinear());
-const TINT_PICK = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 6, 7];
+// swarm palettes: MARBLE from the glossy-spheres reference, REF from the
+// dusty-pink reference, and the eight BLUEMARBLE invitation colorways
+// (each poster's background + its ink colors as bead tints)
+const SWARM_PALETTES = [
+  { name: 'Marble', bg: '#04060a',
+    cols: ['#f2f6ff', '#c8ddf2', '#9fc2e8', '#6f96dc', '#3b5fc0', '#274099', '#62c8c8'] },
+  { name: 'Ref',    bg: '#a6d3cd',
+    cols: ['#f4ece0', '#dca4ac', '#c87e92', '#a25670', '#5e2c3a', '#4a5a6a', '#8aa8b6'] },
+  { name: 'Cream',  bg: '#d9d3a4', cols: ['#2a50c8', '#25aedd', '#1a3a9c'] },
+  { name: 'Peri',   bg: '#a9b2e3', cols: ['#e0791e', '#9b9ba8', '#c4c8d8'] },
+  { name: 'Cocoa',  bg: '#483621', cols: ['#2f8fdf', '#2cc6d9', '#1a64b0'] },
+  { name: 'Silver', bg: '#c3c3c7', cols: ['#9b9ba3', '#e0791e', '#82828c'] },
+  { name: 'Lilac',  bg: '#c293d2', cols: ['#7ec428', '#2bc8e8', '#5aa018'] },
+  { name: 'Navy',   bg: '#1d3161', cols: ['#d97a28', '#e89a40', '#a85a18'] },
+  { name: 'Salmon', bg: '#d59a8b', cols: ['#35d8c2', '#3a57c7', '#28b0a0'] },
+  { name: 'Sky',    bg: '#afbfd3', cols: ['#d95b20', '#3a6fc8', '#e87840'] },
+];
 
 const swarm = new THREE.InstancedMesh(
   new THREE.IcosahedronGeometry(1, 1),
   new THREE.ShaderMaterial({
     uniforms: {
       uScatter: { value: SW.scatter },
+      uGloss: { value: 0.9 },
       uL: { value: new THREE.Vector3(0.55, 0.7, 0.45).normalize() },
+      uL2: { value: new THREE.Vector3(-0.6, 0.35, -0.25).normalize() },
       uBg: { value: SWARM_BG_LIN },
     },
     vertexShader: /* glsl */`
@@ -506,7 +525,8 @@ const swarm = new THREE.InstancedMesh(
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: /* glsl */`
-      uniform float uScatter; uniform vec3 uL; uniform vec3 uBg;
+      uniform float uScatter; uniform float uGloss;
+      uniform vec3 uL; uniform vec3 uL2; uniform vec3 uBg;
       varying vec3 vN; varying vec3 vV; varying vec3 vC;
       void main(){
         vec3 n = normalize(vN), v = normalize(vV);
@@ -517,6 +537,15 @@ const swarm = new THREE.InstancedMesh(
         float thru = pow(max(dot(-v, uL), 0.0), 3.0);
         vec3 col = vC * (0.34 + 0.78 * wrap * wrap);
         col += vC * uScatter * (rim * 0.45 * uBg + thru * 0.55);
+        // glossy highlights from the blue-marble reference: a sharp key
+        // ping, a broad sheen, and a second light from behind-left,
+        // fresnel-boosted so the edges of the shell catch the most light
+        vec3 H = normalize(uL + v), H2 = normalize(uL2 + v);
+        float fres = 0.4 + 0.6 * pow(1.0 - max(dot(n, v), 0.0), 3.0);
+        float spec = pow(max(dot(n, H), 0.0), 140.0) * 1.3
+                   + pow(max(dot(n, H), 0.0), 24.0) * 0.22
+                   + pow(max(dot(n, H2), 0.0), 90.0) * 0.5;
+        col += uGloss * spec * fres;
         gl_FragColor = vec4(col, 1.0);
       }`,
   }),
@@ -526,9 +555,30 @@ swarm.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 swarm.frustumCulled = false;
 swarm.count = SW.count;
 swarm.visible = false;
-for (let i = 0; i < MAX_SWARM; i++)
-  swarm.setColorAt(i, SWARM_TINTS[TINT_PICK[Math.floor(rnd() * TINT_PICK.length)]]);
 scene.add(swarm);
+
+// each base ink color contributes itself plus a lighter and a darker tone,
+// so the beads read as one family with depth, like the references
+const sswatchEls = {};
+let activeSwarmPalette = SWARM_PALETTES[0];
+function setSwarmPalette(p) {
+  activeSwarmPalette = p;
+  SWARM_BG.set(p.bg);
+  SWARM_BG_LIN.copy(SWARM_BG).convertSRGBToLinear();
+  const pool = [];
+  for (const hx of p.cols) {
+    const c = new THREE.Color(hx), hsl = {};
+    c.getHSL(hsl);
+    pool.push(c.clone().convertSRGBToLinear());
+    pool.push(new THREE.Color().setHSL(hsl.h, hsl.s, Math.min(hsl.l + 0.14, 0.95)).convertSRGBToLinear());
+    pool.push(new THREE.Color().setHSL(hsl.h, hsl.s * 0.9, Math.max(hsl.l - 0.12, 0.05)).convertSRGBToLinear());
+  }
+  for (let i = 0; i < MAX_SWARM; i++)
+    swarm.setColorAt(i, pool[Math.floor(rnd() * pool.length)]);
+  swarm.instanceColor.needsUpdate = true;
+  for (const [k, el] of Object.entries(sswatchEls)) el.classList.toggle('active', k === p.name);
+}
+setSwarmPalette(SWARM_PALETTES[0]);
 
 function swarmSim(dt, t) {
   const f = SW.scale, f2 = f * 2.7, T = t * SW.speed;
@@ -902,6 +952,7 @@ const SWARM_SLIDERS = [
   { key: 'shell',   label: 'Shell',   min: 0.6, max: 1.8,  step: 0.01,  fmt: v => v.toFixed(2) },
   { key: 'spread',  label: 'Spread',  min: 0,   max: 0.6,  step: 0.005, fmt: v => v.toFixed(3) },
   { key: 'scatter', label: 'Scatter', min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'gloss',   label: 'Gloss',   min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
 ];
 {
   SWARM_SLIDERS.forEach(cfg => {
@@ -914,6 +965,7 @@ const SWARM_SLIDERS = [
       SW[cfg.key] = parseFloat(inp.value);
       val.textContent = cfg.fmt(SW[cfg.key]);
       if (cfg.key === 'scatter') swarm.material.uniforms.uScatter.value = SW.scatter;
+      if (cfg.key === 'gloss')   swarm.material.uniforms.uGloss.value = SW.gloss;
     };
     row.append(lab, val, inp);
     paneSwarm.appendChild(row);
@@ -939,6 +991,7 @@ function setMode(m) {
   paneOrb.style.display = m === 'orb' ? '' : 'none';
   paneSwarm.style.display = m === 'swarm' ? '' : 'none';
   document.getElementById('palettes').style.display = m === 'orb' ? '' : 'none';
+  document.getElementById('spalettes').style.display = m === 'swarm' ? 'flex' : 'none';
   for (const [k, b] of Object.entries(tabBtns)) b.classList.toggle('active', k === m);
 }
 {
@@ -950,6 +1003,19 @@ function setMode(m) {
     tabBtns[key] = b;
     tabs.appendChild(b);
   }
+  // swarm palette swatches: poster background ringing the ink colors
+  const spal = document.getElementById('spalettes');
+  for (const p of SWARM_PALETTES) {
+    const el = document.createElement('div');
+    el.className = 'swatch';
+    el.title = p.name;
+    el.style.background =
+      `radial-gradient(circle at 35% 35%, ${p.cols[0]} 0%, ${p.cols[0]} 38%, ${p.bg} 46%, ${p.bg} 100%)`;
+    el.onclick = () => setSwarmPalette(p);
+    sswatchEls[p.name] = el;
+    spal.appendChild(el);
+  }
+  sswatchEls[activeSwarmPalette.name].classList.add('active');
 }
 
 function resize() {
