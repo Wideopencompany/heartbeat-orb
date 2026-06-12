@@ -471,7 +471,8 @@ const protons = [];
 // a divergence-free flow so they orbit the shell in fluid sheets
 const MAX_SWARM = 16000;
 const SW = { count: 7000, size: 1.0, flow: 0.85, scale: 2.2, speed: 1.0,
-             spin: 0.55, shell: 1.05, spread: 0.14, scatter: 1.0, gloss: 0.9 };
+             spin: 0.55, shell: 1.05, spread: 0.14, scatter: 1.0, gloss: 0.9,
+             jitter: 0.3 };
 const SW_DEFAULTS = { ...SW };
 const SWARM_BG = new THREE.Color(0xa6d3cd);
 const SWARM_BG_LIN = SWARM_BG.clone().convertSRGBToLinear();
@@ -600,24 +601,44 @@ function setSwarmPalette(p) {
 }
 setSwarmPalette(SWARM_PALETTES[0]);
 
+let respawnAcc = 0, respawnCursor = 0;
+
 function swarmSim(dt, t) {
   const f = SW.scale, f2 = f * 2.7, T = t * SW.speed;
-  const amp = SW.flow * 0.22, spin = SW.spin;
+  const amp = SW.flow * 0.22, spin = SW.spin, jit = SW.jitter * 0.13;
   const arr = swarm.instanceMatrix.array;
+  // anti-coalescing 1/3: the shell projection makes the flow compressible,
+  // so beads drift into its drains over time -- a rolling cursor respawns
+  // ~2% of beads per second at fresh positions, keeping density uniform
+  respawnAcc += SW.count * dt * 0.02;
+  while (respawnAcc >= 1) {
+    respawnAcc -= 1;
+    respawnCursor = (respawnCursor + 1) % SW.count;
+    const b = respawnCursor * 3;
+    let nx = Math.random() * 2 - 1, ny = Math.random() * 2 - 1, nz = Math.random() * 2 - 1;
+    const l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    const rr = SW.shell + swarmOff[respawnCursor] * SW.spread;
+    swarmPos[b] = nx / l * rr; swarmPos[b + 1] = ny / l * rr; swarmPos[b + 2] = nz / l * rr;
+  }
   for (let i = 0; i < SW.count; i++) {
     const b = i * 3;
     let x = swarmPos[b], y = swarmPos[b + 1], z = swarmPos[b + 2];
+    // anti-coalescing 2/3: each bead samples the flow at its own shifted
+    // time, so no two beads share a trajectory into the same drain
+    const Ti = T + swarmOff[i] * 1.7;
     // trig flow: each velocity component ignores its own axis, so the field
     // is divergence-free -- beads slide in sheets instead of clumping
-    let vx = Math.sin(f * y + T)       + Math.cos(f * z + T * 0.7) + 0.5 * Math.sin(f2 * y - T * 1.4);
-    let vy = Math.sin(f * z + T * 0.9) + Math.cos(f * x + T * 0.6) + 0.5 * Math.sin(f2 * z - T * 1.2);
-    let vz = Math.sin(f * x + T * 0.8) + Math.cos(f * y + T * 1.1) + 0.5 * Math.sin(f2 * x - T * 1.5);
+    let vx = Math.sin(f * y + Ti)       + Math.cos(f * z + Ti * 0.7) + 0.5 * Math.sin(f2 * y - Ti * 1.4);
+    let vy = Math.sin(f * z + Ti * 0.9) + Math.cos(f * x + Ti * 0.6) + 0.5 * Math.sin(f2 * z - Ti * 1.2);
+    let vz = Math.sin(f * x + Ti * 0.8) + Math.cos(f * y + Ti * 1.1) + 0.5 * Math.sin(f2 * x - Ti * 1.5);
     // global orbit around Y + soft spring to each bead's own shell radius
     const r = Math.sqrt(x * x + y * y + z * z) || 1e-6;
     const k = ((SW.shell + swarmOff[i] * SW.spread) - r) * 3.0 / r;
-    vx = vx * amp + spin * z + x * k;
-    vy = vy * amp + y * k;
-    vz = vz * amp - spin * x + z * k;
+    // anti-coalescing 3/3: the JITTER randomizer -- a small per-bead wander,
+    // independent of FLOW so it keeps stirring even in a still fluid
+    vx = vx * amp + spin * z + x * k + jit * Math.sin(i * 12.9898 + t * 5.3);
+    vy = vy * amp + y * k            + jit * Math.sin(i * 78.233  + t * 4.1);
+    vz = vz * amp - spin * x + z * k + jit * Math.sin(i * 37.719  + t * 6.7);
     x += vx * dt; y += vy * dt; z += vz * dt;
     swarmPos[b] = x; swarmPos[b + 1] = y; swarmPos[b + 2] = z;
     const m = i * 16, s = 0.011 * SW.size * swarmScl[i];
@@ -1038,6 +1059,7 @@ const SWARM_SLIDERS = [
   { key: 'spread',  label: 'Spread',  min: 0,   max: 0.6,  step: 0.005, fmt: v => v.toFixed(3) },
   { key: 'scatter', label: 'Scatter', min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
   { key: 'gloss',   label: 'Gloss',   min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
+  { key: 'jitter',  label: 'Jitter',  min: 0,   max: 1.5,  step: 0.01,  fmt: v => v.toFixed(2) },
 ];
 const SWARM_STYLES = ['WAX', 'TOON', 'POP', 'INK'];
 const sctl = {};        // swarm slider refs, so RESET can drive the UI
