@@ -511,6 +511,7 @@ const swarm = new THREE.InstancedMesh(
     uniforms: {
       uScatter: { value: SW.scatter },
       uGloss: { value: 0.9 },
+      uStyle: { value: 0 },
       uL: { value: new THREE.Vector3(0.55, 0.7, 0.45).normalize() },
       uL2: { value: new THREE.Vector3(-0.6, 0.35, -0.25).normalize() },
       uBg: { value: SWARM_BG_LIN },
@@ -525,27 +526,45 @@ const swarm = new THREE.InstancedMesh(
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: /* glsl */`
-      uniform float uScatter; uniform float uGloss;
+      uniform float uScatter; uniform float uGloss; uniform float uStyle;
       uniform vec3 uL; uniform vec3 uL2; uniform vec3 uBg;
       varying vec3 vN; varying vec3 vV; varying vec3 vC;
       void main(){
         vec3 n = normalize(vN), v = normalize(vV);
-        // waxy subsurface look: wrapped diffuse, sky bleeding through the
-        // rim, and light passing straight through backlit beads
-        float wrap = clamp((dot(n, uL) + 0.6) / 1.6, 0.0, 1.0);
-        float rim  = pow(1.0 - max(dot(n, v), 0.0), 2.2);
-        float thru = pow(max(dot(-v, uL), 0.0), 3.0);
-        vec3 col = vC * (0.34 + 0.78 * wrap * wrap);
-        col += vC * uScatter * (rim * 0.45 * uBg + thru * 0.55);
-        // glossy highlights from the blue-marble reference: a sharp key
-        // ping, a broad sheen, and a second light from behind-left,
-        // fresnel-boosted so the edges of the shell catch the most light
-        vec3 H = normalize(uL + v), H2 = normalize(uL2 + v);
-        float fres = 0.4 + 0.6 * pow(1.0 - max(dot(n, v), 0.0), 3.0);
-        float spec = pow(max(dot(n, H), 0.0), 140.0) * 1.3
-                   + pow(max(dot(n, H), 0.0), 24.0) * 0.22
-                   + pow(max(dot(n, H2), 0.0), 90.0) * 0.5;
-        col += uGloss * spec * fres;
+        vec3 col;
+        if (uStyle < 0.5) {
+          // WAX: fake subsurface -- wrapped diffuse, sky bleeding through
+          // the rim, light passing through backlit beads -- plus fresnel-
+          // boosted glossy specular from two lights (blue-marble reference)
+          float wrap = clamp((dot(n, uL) + 0.6) / 1.6, 0.0, 1.0);
+          float rim  = pow(1.0 - max(dot(n, v), 0.0), 2.2);
+          float thru = pow(max(dot(-v, uL), 0.0), 3.0);
+          col = vC * (0.34 + 0.78 * wrap * wrap);
+          col += vC * uScatter * (rim * 0.45 * uBg + thru * 0.55);
+          vec3 H = normalize(uL + v), H2 = normalize(uL2 + v);
+          float fres = 0.4 + 0.6 * pow(1.0 - max(dot(n, v), 0.0), 3.0);
+          float spec = pow(max(dot(n, H), 0.0), 140.0) * 1.3
+                     + pow(max(dot(n, H), 0.0), 24.0) * 0.22
+                     + pow(max(dot(n, H2), 0.0), 90.0) * 0.5;
+          col += uGloss * spec * fres;
+        } else {
+          // graphic styles: no light response at all -- flat ink in the
+          // palette colors, with one printed-on specular dot sitting where
+          // the wax key light would ping
+          float edge = max(dot(n, v), 0.0);
+          float dotSpec = smoothstep(0.960, 0.972, dot(n, normalize(uL + v)));
+          if (uStyle < 1.5) {        // TOON: three hard cel bands
+            float d = clamp((dot(n, uL) + 0.6) / 1.6, 0.0, 1.0);
+            float band = 0.5 + 0.24 * smoothstep(0.41, 0.43, d)
+                             + 0.26 * smoothstep(0.69, 0.71, d);
+            col = vC * band;
+          } else if (uStyle < 2.5) { // POP: one flat sticker tone
+            col = vC;
+          } else {                   // INK: flat tone in a heavy dark outline
+            col = mix(vC * 0.16, vC, smoothstep(0.26, 0.36, edge));
+          }
+          col = mix(col, vec3(1.0), dotSpec * clamp(uGloss, 0.0, 1.0));
+        }
         gl_FragColor = vec4(col, 1.0);
       }`,
   }),
@@ -954,7 +973,25 @@ const SWARM_SLIDERS = [
   { key: 'scatter', label: 'Scatter', min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
   { key: 'gloss',   label: 'Gloss',   min: 0,   max: 2,    step: 0.01,  fmt: v => v.toFixed(2) },
 ];
+const SWARM_STYLES = ['WAX', 'TOON', 'POP', 'INK'];
 {
+  // shading style row: WAX is the lit wax look, the rest are pure graphic
+  const srow = document.createElement('div');
+  srow.className = 'bgrid';
+  srow.style.gridTemplateColumns = 'repeat(4,1fr)';
+  const styleBtns = SWARM_STYLES.map((name, i) => {
+    const b = document.createElement('button');
+    b.className = 'bbtn' + (i === 0 ? ' active' : '');
+    b.textContent = name;
+    b.onclick = () => {
+      swarm.material.uniforms.uStyle.value = i;
+      styleBtns.forEach((x, j) => x.classList.toggle('active', j === i));
+    };
+    srow.appendChild(b);
+    return b;
+  });
+  paneSwarm.appendChild(srow);
+
   SWARM_SLIDERS.forEach(cfg => {
     const row = document.createElement('div'); row.className = 'row';
     const lab = document.createElement('label'); lab.textContent = cfg.label;
@@ -973,7 +1010,10 @@ const SWARM_SLIDERS = [
   const btn = document.createElement('button');
   btn.textContent = 'COPY SETTINGS';
   btn.onclick = async () => {
-    const txt = ['SWARM SETTINGS', ...SWARM_SLIDERS.map(s => `${s.key}: ${s.fmt(SW[s.key])}`)].join('\n');
+    const txt = ['SWARM SETTINGS',
+      `style: ${SWARM_STYLES[swarm.material.uniforms.uStyle.value]}`,
+      `palette: ${activeSwarmPalette.name}`,
+      ...SWARM_SLIDERS.map(s => `${s.key}: ${s.fmt(SW[s.key])}`)].join('\n');
     try { await navigator.clipboard.writeText(txt); btn.textContent = 'COPIED ✓'; }
     catch { window.prompt('Copy settings:', txt.replace(/\n/g, ' | ')); }
     setTimeout(() => { btn.textContent = 'COPY SETTINGS'; }, 1200);
