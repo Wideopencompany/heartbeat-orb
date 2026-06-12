@@ -27,10 +27,10 @@
     padding:12px 14px; font:11px/1.5 ui-monospace, Menlo, monospace; color:#9fb2c8;
     user-select:none;
   }
-  #panel .row { display:flex; align-items:center; gap:8px; margin:7px 0; }
-  #panel label { flex:0 0 78px; text-transform:uppercase; letter-spacing:.05em; font-size:9.5px; }
-  #panel input[type=range] { flex:1; accent-color:#5ad8c8; height:3px; }
-  #panel .val { flex:0 0 34px; text-align:right; color:#e6f0fa; }
+  #panel .row { display:flex; flex-wrap:wrap; align-items:center; margin:8px 0; row-gap:3px; }
+  #panel label { flex:1; text-transform:uppercase; letter-spacing:.05em; font-size:9.5px; }
+  #panel input[type=range] { flex:0 0 100%; width:100%; accent-color:#5ad8c8; height:3px; }
+  #panel .val { flex:0 0 auto; text-align:right; color:#e6f0fa; font-size:11px; }
   #panel button {
     width:100%; margin-top:8px; padding:6px 0; cursor:pointer;
     background:rgba(90,216,200,0.12); color:#5ad8c8;
@@ -758,7 +758,7 @@ let gradCb, micBtn;
     // manual drag pins target = value, so the behaviour tween won't fight it
     inp.oninput = () => { S[cfg.key] = targetS[cfg.key] = parseFloat(inp.value); val.textContent = cfg.fmt(S[cfg.key]); applySettings(); };
     ctl[cfg.key] = { inp, val, fmt: cfg.fmt };
-    row.append(lab, inp, val);
+    row.append(lab, val, inp);   // label + number on top, full-width slider below
     panel.appendChild(row);
   });
   // gradient-core toggle: moving multicolor light inside the orb
